@@ -72,7 +72,7 @@ static void mqtt_client_event(struct mg_connection *nc, int ev, void *ev_data)
     }
     case MG_EV_MQTT_CONNACK:
         if (msg->connack_ret_code != MG_EV_MQTT_CONNACK_ACCEPTED) {
-            fprintf(stderr, "MQTT Connection error: %d\n", msg->connack_ret_code);
+            fprintf(stderr, "MQTT Connection error: %u\n", msg->connack_ret_code);
         }
         else {
             fprintf(stderr, "MQTT Connection established.\n");
@@ -80,7 +80,7 @@ static void mqtt_client_event(struct mg_connection *nc, int ev, void *ev_data)
         }
         break;
     case MG_EV_MQTT_PUBACK:
-        fprintf(stderr, "MQTT Message publishing acknowledged (msg_id: %d)\n", msg->message_id);
+        fprintf(stderr, "MQTT Message publishing acknowledged (msg_id: %u)\n", msg->message_id);
         break;
     case MG_EV_MQTT_SUBACK:
         fprintf(stderr, "MQTT Subscription acknowledged.\n");
@@ -560,7 +560,7 @@ struct data_output *data_output_mqtt_create(struct mg_mgr *mgr, char *param, cha
     if (strncmp(param, "mqtts", 5) == 0) {
         tls_opts.tls_ca_cert = "*"; // TLS is enabled but no cert verification is performed.
     }
-    param      = arg_param(param);
+    param      = arg_param(param); // strip scheme
     char *host = "localhost";
     char *port = tls_opts.tls_ca_cert ? "8883" : "1883";
     char *opts = hostport_param(param, &host, &port);

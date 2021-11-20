@@ -383,7 +383,7 @@ static void sdr_callback(unsigned char *iq_buf, uint32_t len, void *ctx)
     // always process frames if loader, dumper, or analyzers are in use, otherwise skip silent frames
     int process_frame = demod->squelch_offset <= 0 || !noise_only || demod->load_info.format || demod->analyze_pulses || demod->dumper.len || demod->samp_grab;
     if (noise_only) {
-        demod->noise_level = (demod->noise_level * 7 + avg_db) / 8; // average over 8 frames
+        demod->noise_level = (demod->noise_level * 7 + avg_db) / 8; // fast fall over 8 frames
         // If auto_level and noise level well below min_level and significant change in noise level
         if (demod->auto_level > 0 && demod->noise_level < demod->min_level - 3.0f
                 && fabsf(demod->min_level_auto - demod->noise_level - 3.0f) > 1.0f) {
@@ -391,10 +391,13 @@ static void sdr_callback(unsigned char *iq_buf, uint32_t len, void *ctx)
             fprintf(stderr, "Estimated noise level is %.1f dB, adjusting minimum detection level to %.1f dB\n", demod->noise_level, demod->min_level_auto);
             pulse_detect_set_levels(demod->pulse_detect, demod->use_mag_est, demod->level_limit, demod->min_level_auto, demod->min_snr, demod->detect_verbosity);
         }
+    } else {
+        demod->noise_level = (demod->noise_level * 31 + avg_db) / 32; // slow rise over 32 frames
     }
     // Report noise every report_noise seconds, but only for the first frame that second
     if (cfg->report_noise && last_frame_sec != demod->now.tv_sec && demod->now.tv_sec % cfg->report_noise == 0) {
-        fprintf(stderr, "Current level %.1f dB, estimated noise %.1f dB\n", avg_db, demod->noise_level);
+        fprintf(stderr, "Current %s level %.1f dB, estimated noise %.1f dB\n",
+                noise_only ? "noise" : "signal", avg_db, demod->noise_level);
     }
 
     if (process_frame)
@@ -678,9 +681,8 @@ static void sdr_callback(unsigned char *iq_buf, uint32_t len, void *ctx)
     if (cfg->hop_now && !cfg->exit_async) {
         cfg->hop_now = 0;
         time(&cfg->hop_start_time);
-        cfg->frequency_index  = (cfg->frequency_index + 1) % cfg->frequencies;
-        cfg->center_frequency = cfg->frequency[cfg->frequency_index];
-        sdr_set_center_freq(cfg->dev, cfg->center_frequency, 0);
+        cfg->frequency_index = (cfg->frequency_index + 1) % cfg->frequencies;
+        sdr_set_center_freq(cfg->dev, cfg->frequency[cfg->frequency_index], 0);
     }
 }
 
@@ -1001,7 +1003,7 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
             cfg->report_protocol = 0;
         else if (!strcasecmp(arg, "level"))
             cfg->report_meta = 1;
-        else if (!strcasecmp(arg, "noise"))
+        else if (!strncasecmp(arg, "noise", 5))
             cfg->report_noise = atoiv(arg_param(arg), 10); // atoi_time_default()
         else if (!strcasecmp(arg, "bits"))
             cfg->verbose_bits = 1;
@@ -1142,37 +1144,38 @@ static void parse_conf_option(r_cfg_t *cfg, int opt, char *arg)
     case 'Y':
         if (!arg)
             usage(1);
-        char *p = arg;
+        char const *p = arg;
         while (p && *p) {
-            if (!strncasecmp(p, "autolevel", 9))
-                cfg->demod->auto_level = atoiv(arg_param(arg), 1); // arg_float_default(p + 9, "-Y autolevel: ");
-            else if (!strncasecmp(p, "squelch", 7))
-                cfg->demod->squelch_offset = atoiv(arg_param(arg), 1); // arg_float_default(p + 7, "-Y squelch: ");
-            else if (!strncmp(p, "auto", 4))
+            char const *val = NULL;
+            if (kwargs_match(p, "autolevel", &val))
+                cfg->demod->auto_level = atoiv(val, 1); // arg_float_default(p + 9, "-Y autolevel: ");
+            else if (kwargs_match(p, "squelch", &val))
+                cfg->demod->squelch_offset = atoiv(val, 1); // arg_float_default(p + 7, "-Y squelch: ");
+            else if (kwargs_match(p, "auto", &val))
                 cfg->fsk_pulse_detect_mode = FSK_PULSE_DETECT_AUTO;
-            else if (!strncmp(p, "classic", 7))
+            else if (kwargs_match(p, "classic", &val))
                 cfg->fsk_pulse_detect_mode = FSK_PULSE_DETECT_OLD;
-            else if (!strncmp(p, "minmax", 6))
+            else if (kwargs_match(p, "minmax", &val))
                 cfg->fsk_pulse_detect_mode = FSK_PULSE_DETECT_NEW;
-            else if (!strncmp(p, "ampest", 6))
+            else if (kwargs_match(p, "ampest", &val))
                 cfg->demod->use_mag_est = 0;
-            else if (!strncmp(p, "verbose", 7))
+            else if (kwargs_match(p, "verbose", &val))
                 cfg->demod->detect_verbosity++;
-            else if (!strncmp(p, "magest", 6))
+            else if (kwargs_match(p, "magest", &val))
                 cfg->demod->use_mag_est = 1;
-            else if (!strncasecmp(p, "level", 5))
-                cfg->demod->level_limit = arg_float(p + 5, "-Y level: ");
-            else if (!strncasecmp(p, "minlevel", 8))
-                cfg->demod->min_level = arg_float(p + 8, "-Y minlevel: ");
-            else if (!strncasecmp(p, "minsnr", 6))
-                cfg->demod->min_snr = arg_float(p + 6, "-Y minsnr: ");
-            else if (!strncasecmp(p, "filter", 6))
-                cfg->demod->low_pass = arg_float(p + 6, "-Y filter: ");
+            else if (kwargs_match(p, "level", &val))
+                cfg->demod->level_limit = arg_float(val, "-Y level: ");
+            else if (kwargs_match(p, "minlevel", &val))
+                cfg->demod->min_level = arg_float(val, "-Y minlevel: ");
+            else if (kwargs_match(p, "minsnr", &val))
+                cfg->demod->min_snr = arg_float(val, "-Y minsnr: ");
+            else if (kwargs_match(p, "filter", &val))
+                cfg->demod->low_pass = arg_float(val, "-Y filter: ");
             else {
                 fprintf(stderr, "Unknown pulse detector setting: %s\n", p);
                 usage(1);
             }
-            p = arg_param(p);
+            p = kwargs_skip(p);
         }
         break;
     case 'E':
@@ -1263,16 +1266,19 @@ static void sdr_handler(sdr_event_t *ev, void *ctx)
 
     data_t *data = NULL;
     if (ev->ev & SDR_EV_RATE) {
+        cfg->samp_rate = ev->sample_rate;
         data = data_append(data,
                 "sample_rate", "", DATA_INT, ev->sample_rate,
                 NULL);
     }
     if (ev->ev & SDR_EV_CORR) {
+        cfg->ppm_error = ev->freq_correction;
         data = data_append(data,
                 "freq_correction", "", DATA_INT, ev->freq_correction,
                 NULL);
     }
     if (ev->ev & SDR_EV_FREQ) {
+        cfg->center_frequency = ev->center_frequency;
         data = data_append(data,
                 "center_frequency", "", DATA_INT, ev->center_frequency,
                 "frequencies", "", DATA_COND, cfg->frequencies > 1, DATA_ARRAY, data_array(cfg->frequencies, DATA_INT, cfg->frequency),
@@ -1329,6 +1335,15 @@ int main(int argc, char **argv) {
     }
 
     parse_conf_args(cfg, argc, argv);
+    // apply hop defaults and set first frequency
+    if (cfg->frequencies == 0) {
+        cfg->frequency[0] = DEFAULT_FREQUENCY;
+        cfg->frequencies  = 1;
+    }
+    cfg->center_frequency = cfg->frequency[cfg->frequency_index];
+    if (cfg->frequencies > 1 && cfg->hop_times == 0) {
+        cfg->hop_time[cfg->hop_times++] = DEFAULT_HOP_TIME;
+    }
 
     // add all remaining positional arguments as input files
     while (argc > optind) {
@@ -1408,7 +1423,7 @@ int main(int argc, char **argv) {
             }
             abuf_printf(&p, " ]");
         }
-        fprintf(stderr, "Registered %zu out of %d device decoding protocols%s\n",
+        fprintf(stderr, "Registered %zu out of %u device decoding protocols%s\n",
                 demod->r_devs.len, cfg->num_r_devices, decoders_str);
     }
 
@@ -1735,13 +1750,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "WARNING: Failed to reset buffers.\n");
     r = sdr_activate(cfg->dev);
 
-    if (cfg->frequencies == 0) {
-        cfg->frequency[0] = DEFAULT_FREQUENCY;
-        cfg->frequencies = 1;
-    }
-    if (cfg->frequencies > 1 && cfg->hop_times == 0) {
-        cfg->hop_time[cfg->hop_times++] = DEFAULT_HOP_TIME;
-    }
     if (cfg->verbosity) {
         fprintf(stderr, "Reading samples in async mode...\n");
     }
@@ -1750,7 +1758,6 @@ int main(int argc, char **argv) {
         cfg->stop_time += cfg->duration;
     }
 
-    cfg->center_frequency = cfg->frequency[cfg->frequency_index];
     r = sdr_set_center_freq(cfg->dev, cfg->center_frequency, 1); // always verbose
 
         time(&cfg->hop_start_time);
